@@ -1,0 +1,8 @@
+{
+  "name": "video-monitor-backend",
+  "version": "1.0.0",
+  "dependencies": {
+    "express": "^5.1.0",
+    "puppeteer": "^24.22.3"
+  }
+}
