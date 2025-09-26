@@ -4,14 +4,19 @@ External videoplayer QoE tool
 2. cd backend 
 3. npm install puppeteer express
 4. cd..
-5. npm run start (start both)
+5. npm run start  
+
+// start both back and front
 
 --------------------------
 Start backend only:
-	cd backend
-	node puppeteer-sse.js
+
+node backend/puppeteer-sse.js
+
+--------------------------
 
 Frontend: localhost:8000
+
 Backend: localhost:3001
 
 --------------------------
