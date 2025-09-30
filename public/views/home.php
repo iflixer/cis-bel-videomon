@@ -2,10 +2,26 @@
 
 <form id="testForm">
     <input type="text" name="url" placeholder="Video URL" size="60">
+    <select name="testtype">
+        <option value="1">1</option>
+        <option value="3">3</option>
+        <option value="5">5</option>
+        <option value="1r1">1r1</option>
+        <option value="2r2">2r2</option>
+        <option value="3r3">3r3</option>
+        <option value="5r5">5r5</option>
+    </select>
+    <select name="quality">
+        <option value="1080">1080</option>
+        <option value="720">720</option>
+        <option value="480">480</option>
+        <option value="360">360</option>
+        <option value="240">240</option>
+    </select>
     <button type="submit">Run Test</button>
 </form>
 
-<p>Time Remaining: <span id="timer">5:00</span></p>
+<p>Time Remaining: <span id="timer">00:00</span></p>
 
 <h3>Requests:</h3>
 <table border="1" id="requestsTable" style="width:100%; border-collapse: collapse;">
@@ -30,17 +46,28 @@
     const tbody = document.querySelector('#requestsTable tbody');
     let timerInterval;
 
+    function textToInt(text) {
+        return text
+            .split('r')
+            .map(Number)      // convert each part to integer
+            .reduce((a, b) => a + b, 0); // sum all numbers
+    }
+
+
     form.addEventListener('submit', async e => {
         e.preventDefault();
         const url = form.url.value.trim();
+        const testtype = form.testtype.value;
+        const quality = form.quality.value;
         if (!url) return;
 
         tbody.innerHTML = '';
         alertsEl.innerHTML = '';
         clearInterval(timerInterval);
 
-        // 5-minute countdown
-        let secondsRemaining = 5*60;
+        // SET countdown
+        var tout = textToInt(testtype);
+        let secondsRemaining = tout*60 + 10;
         timerEl.textContent = formatTime(secondsRemaining);
         timerInterval = setInterval(() => {
             secondsRemaining--;
@@ -59,7 +86,7 @@
         }
 
         // SSE connection
-        const sse = new EventSource(`http://localhost:3001/run?url=${encodeURIComponent(url)}`);
+        const sse = new EventSource(`http://localhost:3001/run?test=${testtype}&url=${encodeURIComponent(url)}%3Fdomain%3Dpiratka.me%26autoplay%3D1%26monq%3D${quality}`);
 
         sse.onmessage = function(event) {
             const r = JSON.parse(event.data);
