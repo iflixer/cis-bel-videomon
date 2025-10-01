@@ -2,14 +2,15 @@
 
 <form id="testForm">
     <input type="text" name="url" placeholder="Video URL" size="60">
+    <input type="text" name="movietitle" placeholder="Movie title" size="40">
     <select name="testtype">
-        <option value="1">1</option>
-        <option value="3">3</option>
-        <option value="5">5</option>
-        <option value="1r1">1r1</option>
-        <option value="2r2">2r2</option>
-        <option value="3r3">3r3</option>
-        <option value="5r5">5r5</option>
+        <option value="1">1 min</option>
+        <option value="3">3 min</option>
+        <option value="5">5 min</option>
+        <option value="1r1">1m-r-1m</option>
+        <option value="2r2">2m-r-2m</option>
+        <option value="3r3">3m-r-3m</option>
+        <option value="5r5">5m-r-5m</option>
     </select>
     <select name="quality">
         <option value="1080">1080</option>
@@ -59,6 +60,7 @@
         const url = form.url.value.trim();
         const testtype = form.testtype.value;
         const quality = form.quality.value;
+        const title = form.movietitle.value;
         if (!url) return;
 
         tbody.innerHTML = '';
@@ -67,7 +69,7 @@
 
         // SET countdown
         var tout = textToInt(testtype);
-        let secondsRemaining = tout*60 + 10;
+        let secondsRemaining = tout * 60 + 10;
         timerEl.textContent = formatTime(secondsRemaining);
         timerInterval = setInterval(() => {
             secondsRemaining--;
@@ -77,18 +79,18 @@
 
         try {
             // Test URL availability first
-            const testResp = await fetch(url, { method: 'HEAD', mode: 'no-cors' });
+            const testResp = await fetch(url, {method: 'HEAD', mode: 'no-cors'});
             // If fetch fails, will go to catch
-        } catch(err) {
+        } catch (err) {
             alertsEl.innerHTML = `<div style="color:red">Error: URL cannot be reached.</div>`;
             clearInterval(timerInterval);
             return;
         }
 
         // SSE connection
-        const sse = new EventSource(`http://localhost:3001/run?test=${testtype}&url=${encodeURIComponent(url)}%3Fdomain%3Dpiratka.me%26autoplay%3D1%26monq%3D${quality}`);
+        const sse = new EventSource(`http://localhost:3001/run?test=${testtype}&title=${movietitle}&url=${encodeURIComponent(url)}%3Fdomain%3Dpiratka.me%26autoplay%3D1%26monq%3D${quality}`);
 
-        sse.onmessage = function(event) {
+        sse.onmessage = function (event) {
             const r = JSON.parse(event.data);
             const tr = document.createElement('tr');
 
@@ -114,7 +116,7 @@
             const data = JSON.parse(event.data);
             if (data.slowNodes.length) {
                 data.slowNodes.forEach(n => {
-                    alertsEl.innerHTML += `<div style="color:red">${n.status}: ${n.url} ${n.mbps??''} ${n.reason??''}</div>`;
+                    alertsEl.innerHTML += `<div style="color:red">${n.status}: ${n.url} ${n.mbps ?? ''} ${n.reason ?? ''}</div>`;
                 });
             } else {
                 alertsEl.innerHTML = '<div style="color:green">All nodes OK</div>';
@@ -122,16 +124,16 @@
             sse.close();
         });
 
-        sse.onerror = function() {
+        sse.onerror = function () {
             alertsEl.innerHTML = `<div style="color:red">Error: SSE connection lost or URL cannot be reached.</div>`;
             sse.close();
             clearInterval(timerInterval);
         };
     });
 
-    function formatTime(sec){
-        const m = Math.floor(sec/60);
-        const s = sec%60;
-        return `${m}:${s.toString().padStart(2,'0')}`;
+    function formatTime(sec) {
+        const m = Math.floor(sec / 60);
+        const s = sec % 60;
+        return `${m}:${s.toString().padStart(2, '0')}`;
     }
 </script>

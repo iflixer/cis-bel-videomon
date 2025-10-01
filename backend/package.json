@@ -3,6 +3,8 @@
   "version": "1.0.0",
   "dependencies": {
     "express": "^5.1.0",
-    "puppeteer": "^24.22.3"
+    "puppeteer": "^24.22.3",
+    "node-cron": "",
+    "node-fetch": ""
   }
 }
