@@ -61,7 +61,7 @@ async function runTest() {
 
     // Schedule next run dynamically
     const minutes = getTestDurationMinutes(config.test);
-    const intervalSec = (minutes * 60) + 60; // add 1min gap
+    const intervalSec = (minutes * 60) + 120; // 2min gap for adverts
     console.log(`Next run in ${intervalSec} sec...`);
 
     setTimeout(runTest, intervalSec * 1000);
