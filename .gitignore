@@ -2,3 +2,4 @@
 package-lock.json
 /backend/node_modules
 /.idea
+backend/puppeteer-tests.log
