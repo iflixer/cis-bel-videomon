@@ -31,7 +31,7 @@ const logFile = path.join(__dirname, 'puppeteer-tests.log');
 
 let itemKey = 'item_id'; // default log key
 function logRow(row, itemId, itemKey) {
-    const line = `[event_type = chunk | ${itemKey}=${itemId} | ${row.status} | ${row.url} | ${row.mbps ?? ''} | ${row.size ?? ''} | ${row.reason ?? '' } } ${new Date().toISOString()}]\n`;
+    const line = `[event_type = chunk | ${itemKey}=${itemId} | ${row.status} | ${row.url} | ${row.mbps ?? 'N/A'} | ${row.size ?? 'N/A'} | ${row.reason ?? 'DONE' } | ${new Date().toISOString()}]\n`;
     fs.appendFile(logFile, line, err => {
         if (err) console.error('Log write error:', err);
     });
@@ -266,7 +266,7 @@ app.get('/run', async (req, res) => {
                 type: req.resourceType(),
                 status,
                 mbps: mbps ? mbps.toFixed(4) : '',
-                size: sizeBytes ? sizeBytes : ''
+                size: sizeBytes ? sizeBytes : 'n/a'
             };
 
             metrics.requests.push(reqData);

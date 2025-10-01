@@ -5,6 +5,7 @@ External videoplayer QoE tool
 3. npm install puppeteer express node-fetch child_process
 4. cd..
 5. npm run start  // start both back and front (no cron) | Front tests: localhost:8000
+
 6. npm run cronback  // start back with cron runner | CRON TEST CONFIG: backend/cron-runner.js
 
 

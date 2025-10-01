@@ -15,7 +15,7 @@ let config = {
 function getTestDurationMinutes(testStr) {
     if (!testStr) return 5; // default 5 minutes
     // e.g. "2r2" → [2,2], "5" → [5]
-    const parts = testStr.split('r').map(n => parseInt(n, 10)).filter(Boolean);
+    const parts = testStr.split('r').map(n => parseInt(n, 2)).filter(Boolean);
     const total = parts.reduce((sum, n) => sum + n, 0);
     return total || 5;
 }
@@ -61,7 +61,7 @@ async function runTest() {
 
     // Schedule next run dynamically
     const minutes = getTestDurationMinutes(config.test);
-    const intervalSec = (minutes * 60) + 10; // add 10s buffer
+    const intervalSec = (minutes * 60) + 20; // add 10s buffer
     console.log(`Next run in ${intervalSec} sec...`);
 
     setTimeout(runTest, intervalSec * 1000);
