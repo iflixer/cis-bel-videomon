@@ -14,9 +14,14 @@ let config = {
 // ---------- Helper: parse test param into total minutes ----------
 function getTestDurationMinutes(testStr) {
     if (!testStr) return 5; // default 5 minutes
-    // e.g. "2r2" → [2,2], "5" → [5]
-    const parts = testStr.split('r').map(n => parseInt(n, 2)).filter(Boolean);
+    // e.g. "2r2" → [2, 2], "5" → [5]
+    const parts = testStr
+        .split('r')
+        .map(n => parseInt(n, 10))  // <-- decimal, not binary
+        .filter(n => !isNaN(n));
+
     const total = parts.reduce((sum, n) => sum + n, 0);
+    console.log("Parsed test duration minutes:", total);
     return total || 5;
 }
 
