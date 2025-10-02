@@ -21,7 +21,6 @@ function getTestDurationMinutes(testStr) {
         .filter(n => !isNaN(n));
 
     const total = parts.reduce((sum, n) => sum + n, 0);
-    console.log("Parsed test duration minutes:", total);
     return total || 5;
 }
 
