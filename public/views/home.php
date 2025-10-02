@@ -2,7 +2,6 @@
 
 <form id="testForm">
     <input type="text" name="url" placeholder="Video URL" size="60">
-    <input type="text" name="movietitle" placeholder="Movie title" size="40">
     <select name="testtype">
         <option value="1">1 min</option>
         <option value="3">3 min</option>
@@ -32,7 +31,7 @@
         <th>Type</th>
         <th>Status</th>
         <th>Speed (Mbps)</th>
-        <th>Size</th>
+        <th>Size (Mb)</th>
     </tr>
     </thead>
     <tbody></tbody>
@@ -60,7 +59,6 @@
         const url = form.url.value.trim();
         const testtype = form.testtype.value;
         const quality = form.quality.value;
-        const title = form.movietitle.value;
         if (!url) return;
 
         tbody.innerHTML = '';
@@ -68,8 +66,12 @@
         clearInterval(timerInterval);
 
         // SET countdown
+        var advtimeout = 30;
+        if(testtype.length > 2){
+            advtimeout = 60;
+        }
         var tout = textToInt(testtype);
-        let secondsRemaining = tout * 60 + 10;
+        let secondsRemaining = tout * 60 + advtimeout;
         timerEl.textContent = formatTime(secondsRemaining);
         timerInterval = setInterval(() => {
             secondsRemaining--;
@@ -88,7 +90,7 @@
         }
 
         // SSE connection
-        const sse = new EventSource(`http://localhost:3001/run?test=${testtype}&title=${movietitle}&url=${encodeURIComponent(url)}%3Fdomain%3Dpiratka.me%26autoplay%3D1%26monq%3D${quality}`);
+        const sse = new EventSource(`http://localhost:3001/run?test=${testtype}&title=Manual_Test&url=${encodeURIComponent(url)}%3Fdomain%3Dpiratka.me%26autoplay%3D1%26monq%3D${quality}`);
 
         sse.onmessage = function (event) {
             const r = JSON.parse(event.data);
@@ -114,12 +116,12 @@
             clearInterval(timerInterval);
             timerEl.textContent = '0:00';
             const data = JSON.parse(event.data);
-            if (data.slowNodes.length) {
-                data.slowNodes.forEach(n => {
+            if (data.suspiciousRequests.length) {
+                data.suspiciousRequests.forEach(n => {
                     alertsEl.innerHTML += `<div style="color:red">${n.status}: ${n.url} ${n.mbps ?? ''} ${n.reason ?? ''}</div>`;
                 });
             } else {
-                alertsEl.innerHTML = '<div style="color:green">All nodes OK</div>';
+                alertsEl.innerHTML = '<div style="color:green">All movie chunks - OK</div>';
             }
             sse.close();
         });

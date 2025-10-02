@@ -4,7 +4,7 @@ const cron = require('node-cron');
 
 // ---------- Config variables ----------
 let config = {
-    test: "3r3",             // can be "2", "2r2", "5r5" etc.
+    test: "5r5",             // can be "2", "2r2", "5r5" etc.
     quality: "1080",
     domain: "piratka.me",
     jsonEndpoint: "https://master.futmax.info/test/random_movie",
@@ -45,7 +45,6 @@ async function runTest() {
         // Append quality param
         if (config.quality) {
             targetUrl = `${targetUrl}?domain=${config.domain}&autoplay=1&monq=${config.quality}`;
-            targetUrl = targetUrl.replace(".help/kinopoisk/", ".help/show/kinopoisk/"); // REMOVE WHEN FIXED
             console.log('Test url: '+targetUrl);
         }
 
