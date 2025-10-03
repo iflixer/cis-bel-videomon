@@ -60,11 +60,8 @@ app.get('/run', async (req, res) => {
         itemId = kinopoiskMatch[1];
     } else if (directMatch) {
         itemId = directMatch[1];
-    }
-    if(directMatch){
         diritemId =  directMatch[1];
     }
-
     // Get the specific parameter 'monq'
     let monqValue = inparams.get('monq');
     let title = '';
