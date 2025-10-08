@@ -1,5 +1,6 @@
 External videoplayer QoE tool
 
+
 ```
 обновление тега major/minor/patch автоматическое при пуше
 если ничего - это patch
