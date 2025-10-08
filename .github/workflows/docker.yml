@@ -89,7 +89,7 @@ jobs:
             -d '{
               "chat_id": "'"${{ secrets.TG_CHAT_ID }}"'",
               "parse_mode": "Markdown",
-              "text": "❌ *Ошибка в GitHub Actions Workflow!*\n\n🧑 Автор: ${{ github.actor }}\n📝 Commit: `${{ github.sha }}`\n Last log lines:${LOG_FPM}\n${LOG_NGINX}",
+              "text": "❌ *Ошибка в GitHub Actions Workflow!*\n\n🧑 Автор: ${{ github.actor }}\n📝 Commit: `${{ github.sha }}`",
               "reply_markup": {
                 "inline_keyboard": [[
                   {
