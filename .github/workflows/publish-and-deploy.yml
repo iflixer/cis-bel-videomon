@@ -87,12 +87,29 @@ jobs:
       - name: Setup kubectl
         uses: azure/setup-kubectl@v4
 
-      - name: Write kubeconfig
+      - name: Write & patch kubeconfig
         run: |
-          mkdir -p ~/.kube
-          printf '%s\n' "${KUBE_CONFIG}" > ~/.kube/config
+            mkdir -p ~/.kube
+            printf '%s\n' "${KUBE_CONFIG}" > ~/.kube/config
+            # заменить endpoint на внешний
+            python - <<'PY'
+            import sys, yaml, os, pathlib
+            p = pathlib.Path.home()/'.kube'/'config'
+            cfg = yaml.safe_load(p.read_text())
+            for c in cfg.get('clusters', []):
+                c['cluster']['server'] = f"https://{os.environ['K8S_API']}:6443"
+            p.write_text(yaml.safe_dump(cfg, sort_keys=False))
+            PY
         env:
-          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+            KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+            K8S_API:     ${{ secrets.K8S_API }}   # добавь в Secrets внешний IP/DNS API
+
+    #   - name: Write kubeconfig
+    #     run: |
+    #       mkdir -p ~/.kube
+    #       printf '%s\n' "${KUBE_CONFIG}" > ~/.kube/config
+    #     env:
+    #       KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
 
       - name: Show deploying image
         run: echo "Deploying $IMAGE_REPO:$DEPLOY_TAG to $NAMESPACE / ds/$DS_NAME"
