@@ -109,7 +109,7 @@ app.get('/run', async (req, res) => {
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
 
-    const browser = await puppeteer.launch({headless: true, args: ['--no-sandbox']});
+    const browser = await puppeteer.launch({headless: true, args: ['--no-sandbox','--disable-setuid-sandbox','--disable-dev-shm-usage']});
     const page = await browser.newPage();
     var urlavail = false;
     var qcheck = false;
