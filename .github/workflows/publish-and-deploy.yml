@@ -141,24 +141,38 @@ jobs:
         - uses: actions/checkout@v4
           with:
             fetch-depth: 2
+
         - name: Telegram notify
           if: always()
           run: |
             RESULT="${{ needs.deploy.result }}"
             ICON="❌"; [ "$RESULT" = "success" ] && ICON="✅"
-            COMMIT_MSG=$(git log -1 --pretty=%s)
-            COMMIT_URL="${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}"
 
+            COMMIT_MSG="$(git log -1 --pretty=%s)"
+            COMMIT_URL="${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}"
+            RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+            # формируем ТЕКСТ с настоящими переносами строк (heredoc, без экранированных \n)
+            TEXT="$(cat <<EOF
+            ${ICON} *${{ github.repository }}* — deploy *${RESULT}*
+
+            *Branch:* \`${{ github.ref_name }}\`
+            *Tag:* \`${{ needs.build-and-push.outputs.version }}\`
+            *Commit:* [${{ github.sha }}](${COMMIT_URL})
+            *Message:* \`\`\`
+            ${COMMIT_MSG}
+            \`\`\`
+
+            [View logs](${RUN_URL})
+            EOF
+            )"
+
+            # отправка JSON (disable_web_page_preview отключает превью ссылок)
             jq -n \
             --arg chat_id "${{ secrets.TG_CHAT_ID }}" \
+            --arg text "$TEXT" \
             --arg mode "Markdown" \
-            --arg text "${ICON} *${{ github.repository }}* — deploy *${RESULT}*\n\n\
-            *Branch:* \`${{ github.ref_name }}\`\n\
-            *Tag:* \`${{ needs.build-and-push.outputs.version }}\`\n\
-            *Commit:* [${{ github.sha }}]($COMMIT_URL)\n\
-            *Message:* ${COMMIT_MSG}\n\
-            \n[View logs](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})" \
             '{chat_id:$chat_id, text:$text, parse_mode:$mode, disable_web_page_preview:true}' \
-            | curl -s -X POST https://api.telegram.org/bot${{ secrets.TG_BOT_TOKEN }}/sendMessage \
+            | curl -s -X POST "https://api.telegram.org/bot${{ secrets.TG_BOT_TOKEN }}/sendMessage" \
                 -H "Content-Type: application/json" \
                 -d @-
