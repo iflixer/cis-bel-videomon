@@ -1,11 +1,16 @@
 External videoplayer QoE tool
 
-1. npm install 
-2. cd backend 
-3. npm install puppeteer express node-fetch child_process
-4. cd..
-5. npm run start  // Manual tests - start back and front (no cron) 
-6. npm run cronback  // start back with cron runner | CRON TEST CONFIG: backend/cron-runner.js
+запуск для отладки локально
+```
+npm install 
+npm run start  // Manual tests - start back and front (no cron) 
+npm run cronback  // start back with cron runner | CRON TEST CONFIG: backend/cron-runner.js
+```
+
+запуск в докере
+```
+docker-compose up
+```
 
 --------------------------
 Start backend separately:

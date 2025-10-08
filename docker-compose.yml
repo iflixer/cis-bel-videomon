@@ -1,0 +1,14 @@
+
+services:
+  node-app-dev:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./app:/usr/src/app
+    command: npm run start
+  node-app-cron-dev:
+    build: .
+    volumes:
+      - ./app:/usr/src/app
+    command: npm run cronback
