@@ -2,64 +2,88 @@ name: Build, Push to GHCR and Deploy to k3s
 
 on:
   push:
-    tags:
-      - 'v*'
+    branches: [ main ]
   workflow_dispatch:
 
+concurrency:
+  group: build-deploy-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
+  autotag:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # нужно для push tag
+    outputs:
+      tag: ${{ steps.next_tag.outputs.next }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+
+      - name: Get latest tag
+        id: get_tag
+        run: |
+          latest=$(git tag --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1 || echo "v0.0.0")
+          echo "latest=$latest" >> $GITHUB_OUTPUT
+          echo "Latest tag: $latest"
+
+      - name: Calculate next tag (major/minor/patch)
+        id: next_tag
+        run: |
+          latest="${{ steps.get_tag.outputs.latest }}"
+          IFS='.' read -r major minor patch <<<"${latest#v}"
+          msg=$(git log -1 --pretty=%B | tr -d '\n')
+          if [[ "$msg" == *"[major]"* ]]; then
+            major=$((major + 1)); minor=0; patch=0; bump="major"
+          elif [[ "$msg" == *"[minor]"* ]]; then
+            minor=$((minor + 1)); patch=0; bump="minor"
+          else
+            patch=$((patch + 1)); bump="patch"
+          fi
+          next="v$major.$minor.$patch"
+          echo "next=$next" >> $GITHUB_OUTPUT
+          echo "Bump: $bump → $next"
+
+      - name: Create and push tag
+        env:
+          TAG: ${{ steps.next_tag.outputs.next }}
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag "$TAG"
+          git push origin "$TAG"
+
   build-and-push:
     runs-on: ubuntu-latest
+    needs: autotag
     permissions:
       contents: read
       packages: write
       id-token: write
+    env:
+      IMAGE_REPO: ghcr.io/${{ github.repository }}
+      DEPLOY_TAG: ${{ needs.autotag.outputs.tag }}
     outputs:
-      image: ${{ steps.meta.outputs.images }}
-      version: ${{ steps.version.outputs.tag }}
+      version: ${{ steps.outver.outputs.tag }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
 
-      - name: Set up Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Docker login to GHCR
+      - name: Login GHCR
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Docker metadata
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ghcr.io/${{ github.repository }} # ghcr.io/OWNER/REPO
-          tags: |
-            type=sha,format=short
-            type=ref,event=tag
-            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+      - name: Set output version
+        id: outver
+        run: echo "tag=${DEPLOY_TAG}" >> "$GITHUB_OUTPUT"
 
-      - name: Pick deploy tag
-        id: version
-        run: |
-          # берём предпочтительный тег для деплоя:
-          # - если пуш тега vX.Y.Z → используем его
-          # - иначе для main → latest
-          # - иначе sha
-          DEPLOY_TAG=""
-          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
-            DEPLOY_TAG="${GITHUB_REF#refs/tags/}"
-          elif [[ "${GITHUB_REF}" == "refs/heads/main" ]]; then
-            DEPLOY_TAG="latest"
-          else
-            DEPLOY_TAG="$(git rev-parse --short HEAD)"
-          fi
-          echo "tag=${DEPLOY_TAG}" >> $GITHUB_OUTPUT
-
+      # Можно оставить metadata-action, но проще явно задать теги
       - name: Build and push (multi-arch)
         uses: docker/build-push-action@v6
         with:
@@ -67,80 +91,62 @@ jobs:
           file: ./Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          tags: |
+            ${{ env.IMAGE_REPO }}:${{ env.DEPLOY_TAG }}
+            ${{ env.IMAGE_REPO }}:sha-${{ github.sha }}
+            ${{ env.IMAGE_REPO }}:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
   deploy:
     runs-on: ubuntu-latest
     needs: build-and-push
-    permissions:
-      contents: read
     env:
-      NAMESPACE: video-tester
-      DS_NAME: video-tester
-      # если у вас другой путь образа — переопредели IMAGE_REPO
-      IMAGE_REPO: ghcr.io/${{ github.repository }}
-      DEPLOY_TAG: ${{ needs.build-and-push.outputs.version }}
+        NAMESPACE: video-tester
+        DS_NAME: video-tester
+        IMAGE_REPO: ghcr.io/${{ github.repository }}
+        DEPLOY_TAG: ${{ needs.build-and-push.outputs.version }}
     steps:
-      - name: Setup kubectl
-        uses: azure/setup-kubectl@v4
+        - name: Setup kubectl
+          uses: azure/setup-kubectl@v4
 
-      - name: Write & patch kubeconfig
-        run: |
+        - name: Write & patch kubeconfig
+          env:
+            KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+            K8S_API: ${{ secrets.K8S_API }}   # внешний IP/DNS API
+          run: |
             mkdir -p ~/.kube
             printf '%s\n' "${KUBE_CONFIG}" > ~/.kube/config
-            # заменить endpoint на внешний
-            python - <<'PY'
-            import sys, yaml, os, pathlib
-            p = pathlib.Path.home()/'.kube'/'config'
-            cfg = yaml.safe_load(p.read_text())
-            for c in cfg.get('clusters', []):
-                c['cluster']['server'] = f"https://{os.environ['K8S_API']}:6443"
-            p.write_text(yaml.safe_dump(cfg, sort_keys=False))
-            PY
-        env:
-            KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
-            K8S_API:     ${{ secrets.K8S_API }}   # добавь в Secrets внешний IP/DNS API
+            # заменить адрес API на внешний порт 6443
+            sed -i -E "s#server: https://[^:]+:6443#server: https://${K8S_API}:6443#g" ~/.kube/config
+            kubectl version --short
 
-    #   - name: Write kubeconfig
-    #     run: |
-    #       mkdir -p ~/.kube
-    #       printf '%s\n' "${KUBE_CONFIG}" > ~/.kube/config
-    #     env:
-    #       KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+        - name: Show image
+          run: echo "Deploying ${IMAGE_REPO}:${DEPLOY_TAG} to ${NAMESPACE}/ds/${DS_NAME}"
 
-      - name: Show deploying image
-        run: echo "Deploying $IMAGE_REPO:$DEPLOY_TAG to $NAMESPACE / ds/$DS_NAME"
+        - name: Set image on DaemonSet
+          run: kubectl -n "$NAMESPACE" set image ds/"$DS_NAME" app="${IMAGE_REPO}:${DEPLOY_TAG}"
 
-      # Обновляем образ в DaemonSet (контейнер называется 'app' — поправь если другое имя)
-      - name: Set image on DaemonSet
-        run: |
-          kubectl -n "$NAMESPACE" set image ds/"$DS_NAME" app="$IMAGE_REPO:$DEPLOY_TAG" --record
+        - name: Wait rollout
+          run: kubectl -n "$NAMESPACE" rollout status ds/"$DS_NAME" --timeout=10m
 
-      - name: Wait for rollout
-        run: |
-          kubectl -n "$NAMESPACE" rollout status ds/"$DS_NAME" --timeout=2m
-
-      # (опционально) показать новые поды
-      - name: Pods
-        if: always()
-        run: kubectl -n "$NAMESPACE" get pods -o wide -l app=$DS_NAME
+        - name: Pods
+          if: always()
+          run: kubectl -n "$NAMESPACE" get pods -o wide -l app="$DS_NAME"
 
   notify:
     runs-on: ubuntu-latest
     needs: [build-and-push, deploy]
-    if: always()    # выполнится даже при ошибке
+    if: always()
     steps:
-     - name: Telegram notify
-       run: |
-        STATUS="${{ job.status }}"
-        if [ "$STATUS" = "success" ]; then ICON="✅"; else ICON="❌"; fi
-        jq -n --arg chat_id "${{ secrets.TG_CHAT_ID }}" \
-            --arg text "${ICON} *${{ github.repository }}* — deploy *${STATUS}*\n\nBranch: \`${{ github.ref_name }}\`\nRun: [View logs](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})" \
+      - name: Telegram notify
+        run: |
+          RESULT="${{ needs.deploy.result }}"
+          ICON="❌"; [ "$RESULT" = "success" ] && ICON="✅"
+          jq -n \
+            --arg chat_id "${{ secrets.TG_CHAT_ID }}" \
             --arg mode "Markdown" \
+            --arg text "${ICON} *${{ github.repository }}* — deploy *${RESULT}*\n\nBranch: \`${{ github.ref_name }}\`\nTag: \`${{ needs.build-and-push.outputs.version }}\`\nRun: [View logs](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})" \
             '{chat_id:$chat_id, text:$text, parse_mode:$mode}' \
-        | curl -s -X POST https://api.telegram.org/bot${{ secrets.TG_BOT_TOKEN }}/sendMessage \
-            -H "Content-Type: application/json" \
-            -d @-
+          | curl -s -X POST https://api.telegram.org/bot${{ secrets.TG_BOT_TOKEN }}/sendMessage \
+              -H "Content-Type: application/json" -d @-
