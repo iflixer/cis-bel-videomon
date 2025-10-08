@@ -2,8 +2,8 @@ name: Build, Push to GHCR and Deploy to k3s
 
 on:
   push:
-    branches: [ main ]
-    tags: [ 'v*' ]
+    tags:
+      - 'v*'
   workflow_dispatch:
 
 jobs:
