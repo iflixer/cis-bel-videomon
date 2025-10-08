@@ -1,0 +1,46 @@
+name: Auto Increment Tag
+
+on:
+  push:
+    branches: [ main ]
+
+permissions:
+  contents: write  # нужно для push тега
+
+jobs:
+  autotag:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # важно — чтобы видеть все теги
+
+      - name: Get latest tag
+        id: get_tag
+        run: |
+          # Берём последний тег формата v*, если нет — начинаем с v0.0.0
+          latest=$(git tag --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1 || echo "v0.0.0")
+          echo "latest=$latest" >> $GITHUB_OUTPUT
+
+      - name: Calculate next tag
+        id: next_tag
+        run: |
+          latest="${{ steps.get_tag.outputs.latest }}"
+          IFS='.' read -r major minor patch <<<"${latest#v}"
+          patch=$((patch + 1))
+          next="v$major.$minor.$patch"
+          echo "next=$next" >> $GITHUB_OUTPUT
+          echo "Next tag will be $next"
+
+      - name: Create and push tag
+        env:
+          TAG: ${{ steps.next_tag.outputs.next }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag "$TAG"
+          git push origin "$TAG"
+
+      - name: Notify
+        run: echo "✅ Created and pushed tag ${{ steps.next_tag.outputs.next }}"
