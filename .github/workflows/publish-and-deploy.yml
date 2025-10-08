@@ -113,13 +113,12 @@ jobs:
         - name: Write & patch kubeconfig
           env:
             KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
-            K8S_API: ${{ secrets.K8S_API }}   # внешний IP/DNS API
+            K8S_API: ${{ secrets.K8S_API }}
           run: |
             mkdir -p ~/.kube
             printf '%s\n' "${KUBE_CONFIG}" > ~/.kube/config
-            # заменить адрес API на внешний порт 6443
             sed -i -E "s#server: https://[^:]+:6443#server: https://${K8S_API}:6443#g" ~/.kube/config
-            kubectl version --short
+            kubectl version -o json | jq -r '"Client: \(.clientVersion.gitVersion)\nServer: \(.serverVersion.gitVersion)"'
 
         - name: Show image
           run: echo "Deploying ${IMAGE_REPO}:${DEPLOY_TAG} to ${NAMESPACE}/ds/${DS_NAME}"
