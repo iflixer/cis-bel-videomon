@@ -42,4 +42,4 @@ ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium-browser \
 
 ENV NODE_ENV=production
 
-CMD ["npm", "cronback"]
+CMD ["npm", "run", "cronback"]
