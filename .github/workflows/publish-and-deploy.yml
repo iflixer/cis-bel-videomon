@@ -135,15 +135,12 @@ jobs:
     steps:
      - name: Telegram notify
        run: |
-        if [ "${{ needs.deploy.result }}" = "success" ]; then
-            ICON="✅"
-        else
-            ICON="❌"
-        fi
-        MSG="${ICON} *${{ github.repository }}* — deploy \`${{ needs.deploy.result }}\`\n\
-        Branch: \`${{ github.ref_name }}\`\n\
-        Run: [View logs](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})"
-        curl -s -X POST https://api.telegram.org/bot${{ secrets.TG_BOT_TOKEN }}/sendMessage \
-            -d chat_id=${{ secrets.TG_CHAT_ID }} \
-            -d parse_mode=Markdown \
-            -d text="$MSG"
+        STATUS="${{ job.status }}"
+        if [ "$STATUS" = "success" ]; then ICON="✅"; else ICON="❌"; fi
+        jq -n --arg chat_id "${{ secrets.TG_CHAT_ID }}" \
+            --arg text "${ICON} *${{ github.repository }}* — deploy *${STATUS}*\n\nBranch: \`${{ github.ref_name }}\`\nRun: [View logs](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})" \
+            --arg mode "Markdown" \
+            '{chat_id:$chat_id, text:$text, parse_mode:$mode}' \
+        | curl -s -X POST https://api.telegram.org/bot${{ secrets.TG_BOT_TOKEN }}/sendMessage \
+            -H "Content-Type: application/json" \
+            -d @-
