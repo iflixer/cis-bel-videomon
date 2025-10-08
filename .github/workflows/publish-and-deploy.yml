@@ -121,9 +121,29 @@ jobs:
 
       - name: Wait for rollout
         run: |
-          kubectl -n "$NAMESPACE" rollout status ds/"$DS_NAME" --timeout=10m
+          kubectl -n "$NAMESPACE" rollout status ds/"$DS_NAME" --timeout=2m
 
       # (опционально) показать новые поды
       - name: Pods
         if: always()
         run: kubectl -n "$NAMESPACE" get pods -o wide -l app=$DS_NAME
+
+  notify:
+    runs-on: ubuntu-latest
+    needs: [build-and-push, deploy]
+    if: always()    # выполнится даже при ошибке
+    steps:
+     - name: Telegram notify
+       run: |
+        if [ "${{ needs.deploy.result }}" = "success" ]; then
+            ICON="✅"
+        else
+            ICON="❌"
+        fi
+        MSG="${ICON} *${{ github.repository }}* — deploy \`${{ needs.deploy.result }}\`\n\
+        Branch: \`${{ github.ref_name }}\`\n\
+        Run: [View logs](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})"
+        curl -s -X POST https://api.telegram.org/bot${{ secrets.TG_BOT_TOKEN }}/sendMessage \
+            -d chat_id=${{ secrets.TG_CHAT_ID }} \
+            -d parse_mode=Markdown \
+            -d text="$MSG"
