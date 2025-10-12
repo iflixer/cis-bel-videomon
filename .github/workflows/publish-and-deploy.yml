@@ -155,14 +155,12 @@ jobs:
             # формируем ТЕКСТ с настоящими переносами строк (heredoc, без экранированных \n)
             TEXT="$(cat <<EOF
             ${ICON} *${{ github.repository }}* — deploy *${RESULT}*
-
             *Branch:* \`${{ github.ref_name }}\`
             *Tag:* \`${{ needs.build-and-push.outputs.version }}\`
             *Commit:* [${{ github.sha }}](${COMMIT_URL})
             *Message:* \`\`\`
             ${COMMIT_MSG}
             \`\`\`
-
             [View logs](${RUN_URL})
             EOF
             )"
