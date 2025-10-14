@@ -8,8 +8,23 @@ let config = {
     quality: "1080",
     domain: "piratka.me",
     jsonEndpoint: "https://master.futmax.info/test/random_movie",
-    serverPort: 3001
+    serverPort: 3002
 };
+
+// агрегатор для финальной сводки
+function makeAgg() {
+  return {
+    startedAt: Date.now(),
+    firstM3u8At: null,
+    firstTsAt: null,
+    total: 0,      // всего успешных request (media)
+    slow: 0,
+    ok: 0,
+    failed: 0,     // loadingFailed
+    bytes: 0,      // суммарно по media
+    seconds: 0,    // сумма длительностей загрузки по media (для avg Mbps)
+  };
+}
 
 // ---------- Helper: parse test param into total minutes ----------
 function getTestDurationMinutes(testStr) {

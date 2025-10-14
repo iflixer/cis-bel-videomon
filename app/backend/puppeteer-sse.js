@@ -1,376 +1,458 @@
-const puppeteer = require('puppeteer');
+// backend/puppeteer-sse.js
+// Run: node backend/puppeteer-sse.js
+// Env: PORT=3002 HEADLESS=true SLOW_THRESHOLD_MBPS=3
+
 const express = require('express');
-const fs = require('fs');
-const path = require('path');
+const { URL } = require('url');
+const puppeteer = require('puppeteer');
 
-const app = express();
-const port = 3001;
+const PORT = parseInt(process.env.PORT || '3002', 10);
+const HEADLESS = (process.env.HEADLESS ?? 'true') !== 'false';
+const SLOW_THRESHOLD_MBPS = parseFloat(process.env.SLOW_THRESHOLD_MBPS || '3'); // <— порог "медленно"
+const TOP_N = 5; // топ-N по entrypoint/router
 
-
-const { exec } = require('child_process');
-
-function restartCronRunner() {
-    console.log('Restarting cron-runner.js...');
-    exec('pm2 restart cron-runner || node backend/cron-runner.js &', (err, stdout, stderr) => {
-        if (err) {
-            console.error('Failed to restart cron-runner.js:', err);
-        } else {
-            console.log('cron-runner.js restarted:', stdout || stderr);
-        }
-    });
+// ---- helpers ----
+function nowIso() { return new Date().toISOString(); }
+function ndjson(type, payload = {}) {
+  const line = JSON.stringify({ ts: nowIso(), type, ...payload });
+  // строго в stdout
+  process.stdout.write(line + '\n');
+}
+function percentile(arr, p) {
+  if (!arr.length) return null;
+  const a = [...arr].sort((x, y) => x - y);
+  const idx = (a.length - 1) * p;
+  const lo = Math.floor(idx), hi = Math.ceil(idx);
+  if (lo === hi) return a[lo];
+  return a[lo] + (a[hi] - a[lo]) * (idx - lo);
+}
+function makeAgg() {
+  return {
+    startedAt: Date.now(),
+    firstM3u8At: null,
+    firstTsAt: null,
+    total: 0,
+    slow: 0,
+    ok: 0,
+    failed: 0,
+    bytes: 0,          // суммарный encodedDataLength
+    seconds: 0,        // суммарное время загрузки (сек)
+    ttfb_ms: [],       // массивы для перцентилей
+    total_ms: [],
+    // распределения (накапливаем bytes и count)
+    byEntrypoint: new Map(), // entrypoint -> {bytes,count}
+    byRouter: new Map(),     // router -> {bytes,count}
+  };
+}
+function bumpMap(map, key, bytes) {
+  if (!key) return;
+  const prev = map.get(key) || { bytes: 0, count: 0 };
+  prev.bytes += bytes || 0;
+  prev.count += 1;
+  map.set(key, prev);
+}
+function topNFromMap(map, n) {
+  return [...map.entries()]
+    .sort((a, b) => b[1].bytes - a[1].bytes)
+    .slice(0, n)
+    .map(([k, v]) => ({ key: k, bytes_mb: +(v.bytes / 1048576).toFixed(3), count: v.count }));
+}
+function parseTestParam(testParam) {
+  let firstDuration = 0, secondDuration = 0, rewind = false;
+  if (/^(\d+)r(\d+)$/.test(testParam)) {
+    const [, a, b] = testParam.match(/^(\d+)r(\d+)$/);
+    firstDuration = parseInt(a, 10) * 60 * 1000;
+    secondDuration = parseInt(b, 10) * 60 * 1000;
+    rewind = true;
+  } else if (/^\d+$/.test(testParam)) {
+    firstDuration = parseInt(testParam, 10) * 60 * 1000;
+  } else {
+    throw new Error('Invalid test parameter');
+  }
+  return { firstDuration, secondDuration, rewind };
+}
+function getExpectedQualityFromUrl(urlStr) {
+  try {
+    const u = new URL(urlStr);
+    const monq = u.searchParams.get('monq');
+    ndjson('monq', { monq_raw: monq, expected_quality: monq ? parseInt(monq, 10) : null });
+    return monq ? parseInt(monq, 10) : null;
+  } catch {
+    ndjson('monq', { monq_raw: null, expected_quality: null });
+    return null;
+  }
+}
+function qualityFromUrl(url) {
+  const m = url.match(/(1080|720|480|360|240)\.mp4:hls/i);
+  return m ? parseInt(m[1], 10) : null;
+}
+function isMediaUrl(url) {
+  return /\.(m3u8|mp4|ts)(\?.*)?$/i.test(url);
 }
 
-// Allow cross-origin requests from PHP frontend
+// ---- puppeteer context helper ----
+async function getContextAndPage(browser) {
+  let context = null;
+  if (typeof browser.createIncognitoBrowserContext === 'function') {
+    context = await browser.createIncognitoBrowserContext();
+  } else if (typeof browser.createBrowserContext === 'function') {
+    context = await browser.createBrowserContext({ incognito: true });
+  }
+  const page = context && typeof context.newPage === 'function'
+    ? await context.newPage()
+    : await browser.newPage();
+  return { context, page };
+}
+
+// ---- wait for CDNplayer + M3U8 readiness ----
+async function waitForPlayer(page, timeout = 8000) {
+  await page.waitForFunction('typeof CDNplayer !== "undefined"', { timeout });
+  ndjson('info', { msg: 'CDNplayer found at start' });
+}
+async function waitForM3U8(page, timeout = 8000) {
+  // ждём любой переход сети на .m3u8  (через CDP у нас тоже ловится, но тут – «верхнеуровневая» гарантия)
+  return new Promise((resolve) => {
+    let resolved = false;
+    const timer = setTimeout(() => {
+      if (!resolved) {
+        resolved = true;
+        ndjson('playlist', { status: 'M3U8_TIMEOUT' });
+        resolve(false);
+      }
+    }, timeout);
+    const onReq = req => {
+      const u = req.url();
+      if (/\.m3u8(\?|$)/i.test(u)) {
+        clearTimeout(timer);
+        if (!resolved) {
+          resolved = true;
+          ndjson('playlist', { status: 'M3U8_OK' });
+          resolve(true);
+        }
+      }
+    };
+    page.on('request', onReq);
+    // safety detach
+    setTimeout(() => page.off('request', onReq), timeout + 1000);
+  });
+}
+
+// ---- app ----
+const app = express();
 app.use((req, res, next) => {
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    next();
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  next();
 });
 
-// Log file
-const logFile = path.join(__dirname, 'puppeteer-tests.json');
-
-function logMetrics(metrics) {
-    let data = [];
-    if (fs.existsSync(logFile)) {
-        try {
-            const content = fs.readFileSync(logFile, 'utf8');
-            if (content.trim()) {
-                data = JSON.parse(content);
-            }
-        } catch (err) {
-            console.error('Error parsing JSON log file:', err);
-        }
-    }
-    data.push(metrics);
-    fs.writeFileSync(logFile, JSON.stringify(data, null, 2));
+let browserSingleton = null;
+async function getBrowser() {
+  if (browserSingleton) return browserSingleton;
+  browserSingleton = await puppeteer.launch({
+    headless: HEADLESS,
+    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
+  });
+  return browserSingleton;
 }
 
 app.get('/run', async (req, res) => {
-    var chunk_count = 0;
-    var adv_debounce = false;
-    var adv_shown = 0;
-    const url = req.query.url;
-    let inparams = new URL(url).searchParams;
-    let itemId = '';
-    let diritemId =  '';
+  const url = req.query.url;
+  const testParam = req.query.test;
+  const title = req.query.title || '';
+
+  if (!url || !testParam) {
+    res.status(400).end('Missing URL or test parameter');
+    return;
+  }
+
+  // SSE headers
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+
+  // отправка SSE-строки
+  const sse = (event, payload) => res.write(`${event ? `event: ${event}\n` : ''}data: ${JSON.stringify(payload)}\n\n`);
+
+  // метаданные прогона
+  const metrics = {
+    test_start: nowIso(),
+    test_finish: '',
+    test_type: testParam,
+    item_title: title,
+    item_direct_id: '',
+    item_kp_id: '',
+    expected_quality: null,
+    delivered_quality: '',
+    test_status: 'IN PROGRESS',
+    adv_shown: 0,
+    requests: 0,
+    suspiciousRequests: [],
+  };
+
+  // попробуем вытащить item_id из пути (как у тебя было)
+  try {
     const kinopoiskMatch = url.match(/kinopoisk\/(\d+)/);
     const directMatch = url.match(/show\/(\d+)/);
+    if (kinopoiskMatch) metrics.item_kp_id = kinopoiskMatch[1];
+    if (directMatch) metrics.item_direct_id = directMatch[1];
+  } catch { /* noop */ }
 
-    if (kinopoiskMatch) {
-        itemId = kinopoiskMatch[1];
-    } else if (directMatch) {
-        itemId = directMatch[1];
-        diritemId =  directMatch[1];
+  // ожидаемое качество из inner url
+  metrics.expected_quality = getExpectedQualityFromUrl(url) ?? null;
+
+  // парсим параметр теста
+  let firstDuration = 0, secondDuration = 0, rewind = false;
+  try {
+    ({ firstDuration, secondDuration, rewind } = parseTestParam(testParam));
+    ndjson('info', { msg: rewind ? `Start ${firstDuration/60000}min - fwd - ${secondDuration/60000}min` : `Start ${firstDuration/60000}min` });
+  } catch (e) {
+    ndjson('error', { msg: e.message });
+    res.status(400).end(e.message);
+    return;
+  }
+
+  const agg = makeAgg();
+
+  let context = null, page = null, client = null;
+  let m3u8Loaded = false;
+  let detectedQuality = null;
+
+  // карты для CDP-метрик
+  const reqMeta = new Map(); // requestId -> {url, start, ttfb_ms, headers, entrypoint, router}
+
+  try {
+    const browser = await getBrowser();
+    ({ context, page } = await getContextAndPage(browser));
+
+    // -- CDP
+    client = await page.target().createCDPSession();
+    await client.send('Network.enable');
+
+    client.on('Network.requestWillBeSent', (e) => {
+      const { requestId, request, wallTime } = e;
+      const url2 = request?.url || '';
+      // запомним старт (мс)
+      reqMeta.set(requestId, {
+        url: url2,
+        start: wallTime ? wallTime * 1000 : Date.now(),
+        ttfb_ms: null,
+        headers: null,
+        // будем позже заполнять entrypoint/router из логов, если сумеем
+        entrypoint: null,
+        router: null,
+      });
+    });
+
+    client.on('Network.responseReceived', (e) => {
+      const meta = reqMeta.get(e.requestId);
+      if (!meta) return;
+      // приблизительный TTFB
+      const t = e.response?.timing;
+      if (t && typeof t.receiveHeadersEnd === 'number' && typeof t.requestTime === 'number') {
+        // requestTime — seconds, receiveHeadersEnd — ms с начала запроса
+        // приведём к ms относительно wall clock:
+        meta.ttfb_ms = t.receiveHeadersEnd;
+      }
+      meta.headers = e.response?.headers || null;
+    });
+
+    client.on('Network.loadingFinished', async (e) => {
+      const meta = reqMeta.get(e.requestId);
+      if (!meta) return;
+      const url2 = meta.url || '';
+      const encodedBytes = e.encodedDataLength || 0;
+
+      // total_ms — от старта до окончания
+      const total_ms = meta.start ? Date.now() - meta.start : null;
+      const durSec = total_ms ? total_ms / 1000 : 0;
+
+      // ттfb (мс)
+      const ttfb_ms = meta.ttfb_ms != null ? meta.ttfb_ms : null;
+
+      // качество
+      const q = qualityFromUrl(url2);
+      if (q && !detectedQuality) {
+        detectedQuality = q;
+        metrics.delivered_quality = detectedQuality;
+        ndjson('quality', { detected: detectedQuality });
+      }
+
+      if (/\.m3u8(\?|$)/i.test(url2)) {
+        m3u8Loaded = true;
+        if (!agg.firstM3u8At) agg.firstM3u8At = Date.now();
+      }
+      const isTS = /\.ts(\?|$)/i.test(url2);
+      if (isTS && !agg.firstTsAt) agg.firstTsAt = Date.now();
+
+      // считать только media
+      if (!isMediaUrl(url2)) return;
+
+      // скорость
+      const mbps = durSec > 0 ? (encodedBytes * 8) / (durSec * 1_000_000) : null;
+      const size_mb = +(encodedBytes / 1048576).toFixed(3);
+
+      let statusTag = 'OK';
+      if (!/\.m3u8(\?|$)/i.test(url2) && !/\.mp4$/i.test(url2)) {
+        if (mbps != null && mbps < SLOW_THRESHOLD_MBPS) statusTag = 'SLOW';
+      }
+
+      // аккумулируем агрегаты
+      agg.total += 1;
+      agg.bytes += encodedBytes;
+      agg.seconds += durSec;
+      if (statusTag === 'SLOW') agg.slow += 1; else agg.ok += 1;
+      if (ttfb_ms != null) agg.ttfb_ms.push(ttfb_ms);
+      if (total_ms != null) agg.total_ms.push(total_ms);
+
+      // попытаемся из URL вытащить entrypoint/router (если есть)
+      // часто Traefik access-лог содержит их, но сюда залетает CDN-URL.
+      // Тогда просто не ставим entrypoint/router.
+      // Если твои URL содержат entrypoint — добавь сюда парсер.
+      const entrypoint = meta.entrypoint || null;
+      const router = meta.router || null;
+
+      bumpMap(agg.byEntrypoint, entrypoint, encodedBytes);
+      bumpMap(agg.byRouter, router, encodedBytes);
+
+      metrics.requests += 1;
+
+      // в SSE — каждую медиа-запись
+      sse('', {
+        url: url2,
+        type: 'request',
+        http: 200, // на уровне CDP «finished» => ok
+        status: statusTag,
+        mbps: mbps != null ? +mbps.toFixed(4) : null,
+        size_mb,
+        ttfb_ms,
+        total_ms: total_ms != null ? +total_ms.toFixed(1) : null,
+      });
+
+      ndjson('request', {
+        url: url2,
+        http: 200,
+        status: statusTag,
+        mbps: mbps != null ? +mbps.toFixed(4) : null,
+        size_mb,
+        ttfb_ms,
+        total_ms: total_ms != null ? +total_ms.toFixed(1) : null,
+      });
+    });
+
+    client.on('Network.loadingFailed', (e) => {
+      const meta = reqMeta.get(e.requestId);
+      const url2 = meta?.url || '';
+      if (!isMediaUrl(url2)) return;
+      agg.failed += 1;
+      metrics.suspiciousRequests.push({
+        url: url2,
+        type: 'request',
+        status: 'FAILED',
+        reason: e.errorText || 'unknown',
+      });
+      sse('', { url: url2, type: 'request', status: 'FAILED', reason: e.errorText || 'unknown' });
+      ndjson('request', { url: url2, status: 'FAILED', reason: e.errorText || 'unknown' });
+    });
+
+    // --- основная логика прогона ---
+    // 1. грузим страницу (быстрый DOM)
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 15000 });
+
+    // 2. ждём появление CDNplayer
+    await waitForPlayer(page);
+
+    // 3. дожидаемся m3u8
+    await waitForM3U8(page);
+    if (!m3u8Loaded) {
+      metrics.test_status = 'M3U8_NOT_LOADED';
+      sse('', { url, type: 'playlist', status: 'M3U8_NOT_LOADED' });
+      ndjson('playlist', { status: 'M3U8_NOT_LOADED' });
     }
-    // Get the specific parameter 'monq'
-    let monqValue = inparams.get('monq');
-    let title = '';
-    if(req.query.title){
-        title = req.query.title;
+
+    // 4. подождать фазу №1
+    if (firstDuration > 0) {
+      await new Promise(r => setTimeout(r, firstDuration));
+    }
+
+    // 5. если нужно — «перемотка» в середину и фаза №2
+    if (rewind) {
+      try {
+        await page.waitForFunction('typeof CDNplayer !== "undefined"', { timeout: 5000 });
+        await page.evaluate(() => {
+          const dur = CDNplayer?.api?.('duration');
+          if (dur && dur > 0) {
+            CDNplayer.api('seek', dur / 2);
+            CDNplayer.api('play');
+          }
+        });
+        ndjson('info', { msg: 'FWD - OK' });
+      } catch {
+        ndjson('info', { msg: 'FWD Failed. CDNplayer.api not reached' });
+      }
+      if (secondDuration > 0) {
+        await new Promise(r => setTimeout(r, secondDuration));
+      }
+    }
+
+    metrics.test_finish = nowIso();
+    metrics.test_status = 'FINISHED';
+
+  } catch (e) {
+    ndjson('error', { msg: e.message || String(e) });
+    metrics.test_finish = nowIso();
+    metrics.test_status = 'ERROR';
+  } finally {
+    // --- финальная сводка ---
+    const avgMbps = agg.seconds > 0 ? (agg.bytes * 8) / (agg.seconds * 1_000_000) : null;
+    const ttfm3u8_ms = agg.firstM3u8At ? (agg.firstM3u8At - agg.startedAt) : null;
+    const ttfseg_ms = agg.firstTsAt ? (agg.firstTsAt - agg.startedAt) : null;
+    const slowPct = agg.total > 0 ? +(agg.slow * 100 / agg.total).toFixed(2) : 0;
+
+    const summary = {
+      requests_total: agg.total,
+      requests_ok: agg.ok,
+      requests_slow: agg.slow,
+      requests_failed: agg.failed,
+      bytes_mb: +(agg.bytes / 1048576).toFixed(3),
+      duration_sum_sec: +agg.seconds.toFixed(3),
+      avg_mbps: avgMbps ? +avgMbps.toFixed(3) : null,
+      ttfm3u8_ms,
+      ttfseg_ms,
+      slow_percent: slowPct,
+      p50_ttfb_ms: percentile(agg.ttfb_ms, 0.5),
+      p90_ttfb_ms: percentile(agg.ttfb_ms, 0.9),
+      p50_total_ms: percentile(agg.total_ms, 0.5),
+      p90_total_ms: percentile(agg.total_ms, 0.9),
+      top_entrypoint_by_bytes: topNFromMap(agg.byEntrypoint, TOP_N),
+      top_router_by_bytes: topNFromMap(agg.byRouter, TOP_N),
+      quality_expected: metrics.expected_quality ?? null,
+      quality_detected: metrics.delivered_quality ?? null,
+      quality_ok: (metrics.expected_quality && metrics.delivered_quality)
+        ? metrics.delivered_quality >= metrics.expected_quality
+        : null,
     };
 
+    ndjson('summary', summary);
+    sse('summary', summary);
 
-    if (!url) return res.status(400).send('Missing URL');
+    // итоговые метрики в NDJSON (как и раньше)
+    ndjson('metrics', metrics);
+    sse('done', {
+      ...metrics,
+      // test_status в финальном done — какой есть (FINISHED/ERROR/M3U8_NOT_LOADED и т.п.)
+    });
 
-    // Extract item_id from kinopoisk path
-
-    const testParam = req.query.test;
-    if (!url || !testParam) return res.status(400).send('Missing URL or test parameter');
-
-    // Parse test parameter
-    let firstDuration = 0;
-    let secondDuration = 0;
-    let rewind = false;
-
-    if (/^(\d+)r(\d+)$/.test(testParam)) {
-        // Example: 5r5 → first 5 minutes, rewind, second 5 minutes
-        const [, a, b] = testParam.match(/^(\d+)r(\d+)$/);
-        firstDuration = parseInt(a, 10) * 60 * 1000;
-        secondDuration = parseInt(b, 10) * 60 * 1000;
-        rewind = true;
-        console.log('Start ' + a + 'min - fwd - ' + b + 'min');
-    } else if (/^\d+$/.test(testParam)) {
-        // Example: 5 → run for 5 minutes
-        firstDuration = parseInt(testParam, 10) * 60 * 1000;
-        console.log('Start ' + testParam + 'min');
-    } else {
-        return res.status(400).send('Invalid test parameter');
-    }
-
-    const slowThresholdMbps = 3;
-    const metrics = {test_start:'', test_finish:'',test_type:'',item_title:'',item_direct_id:'', item_kp_id:'',expected_quality:'',delivered_quality:'',test_status:'', adv_shown:'', requests: '', suspiciousRequests: []};
-
-    const isMedia = u => /\.(mp4|m3u8|ts)(\?.*)?$/i.test(u);
-
-    let m3u8Loaded = false;
-
-
-    res.setHeader('Content-Type', 'text/event-stream');
-    res.setHeader('Cache-Control', 'no-cache');
-    res.setHeader('Connection', 'keep-alive');
-
-    const browser = await puppeteer.launch({headless: true, args: ['--no-sandbox','--disable-setuid-sandbox','--disable-dev-shm-usage']});
-    const page = await browser.newPage();
-    var urlavail = false;
-    var qcheck = false;
-    var delivered_quality = monqValue;
-
-
-    metrics.test_status = 'OK';
-    metrics.test_start = new Date().toISOString();
-    metrics.adv_shown = adv_shown;
-    metrics.item_direct_id = diritemId;
-    metrics.item_kp_id = itemId;
-    metrics.item_title = title;
-    metrics.test_type = testParam;
-    metrics.expected_quality = parseInt(monqValue);
-
-    try {
-        const response = await page.goto(url, {waitUntil: 'domcontentloaded', timeout: 10000});
-
-        if (response && response.ok()) {
-            urlavail = true;
-        } else {
-            const statusCode = response ? response.status() : null;
-            var badstat = `${response ? response.status() : 'No response'}`;
-            console.log(`URL returned status: ${response ? response.status() : 'No response'}`);
-            const reqData = {
-                url: url,
-                type: 'PLAYER',
-                status: badstat,
-                mbps: 'NULL',
-                size: 'NULL'
-            };
-            res.write(`data: ${JSON.stringify(reqData)}\n\n`);
-
-
-            //  If 5xx → stop the test
-            if (statusCode && statusCode >= 500 && statusCode < 600) {
-                const eData = {
-                    title: title,
-                    event_type: `Test finished with server error ${statusCode}`,
-                };
-                metrics.test_status = `Test finished with server error ${statusCode}`;
-
-                res.write(`event: done\ndata: ${JSON.stringify({ error: `Server error ${statusCode}` })}\n\n`);
-                res.end();
-                await browser.close();
-                if(title != 'Manual_Test') {
-                    restartCronRunner();   // <-- restart cron-runner
-                }
-                return;
-            }
-
-
-
-            // If not 5xx, just continue as before
-            res.write(`data: ${JSON.stringify(reqData)}\n\n`);
-
-        }
-    } catch (error) {
-        console.log(`URL is not available. Error: ${error.message}`);
-    }
-
-    if (urlavail) {
-        await page.goto(url, {waitUntil: 'networkidle2'});
-        try {
-            await page.waitForFunction('typeof CDNplayer !== "undefined"', {timeout: 5000});
-            console.log('CDNplayer found at start');
-            metrics.test_status = 'IN PROGRESS';
-            console.log(metrics);
-        } catch (err) {
-            console.log('CDNplayer not found, stopping test');
-            metrics.test_status = `Test Failed, CDNplayer not found, fallback player triggered`;
-
-            // Send SSE final event
-            res.write(`event: done\ndata: ${JSON.stringify({error: "Fail, fallback player"})}\n\n`);
-            res.end();
-            await browser.close();
-            if(title != 'Manual_Test') {
-                restartCronRunner();   // <-- restart cron-runner
-            }
-            return; // stop test
-        }
-        await page.goto(url, {waitUntil: 'networkidle2'});
-
-        page.on('request', req => {
-            const rUrl = req.url();
-            if (!isMedia(rUrl)) return;
-            req._startTime = Date.now(); // start timestamp
-        });
-
-        page.on('requestfinished', async req => {
-            const rUrl = req.url();
-            if (!isMedia(rUrl)) return;
-
-            if (/\.m3u8/i.test(rUrl)) {
-                // Mark playlist as successfully loaded
-                m3u8Loaded = true;
-            }
-
-            let mbps = null;
-            let sizeBytes = 0;
-            let sizeMBytes = 0;
-            try {
-                const response = await req.response();
-                if (response) {
-                    const headers = response.headers();
-                    sizeBytes = parseInt(headers['content-length'] || '0', 10);
-                    sizeMBytes = sizeBytes/1048576;
-                    sizeMBytes = sizeMBytes.toFixed(3);
-                    const durationMs = Date.now() - req._startTime;
-                    const durationSec = durationMs / 1000;
-                    if (sizeBytes > 0 && durationMs > 0) {
-                        mbps = (sizeBytes * 8) / (durationSec * 1_000_000); // Mbps
-                    }
-                }
-            } catch (e) {
-                console.log('Speed calculation error', e);
-            }
-
-            const qualityMatch = rUrl.match(/(1080|720|480|360|240)\.mp4:hls/i);
-            if (qualityMatch && !qcheck) {
-                delivered_quality = parseInt(qualityMatch[1], 10);
-                metrics.delivered_quality = delivered_quality;
-                qcheck = true;
-
-            }
-
-            let status = 'OK';
-
-            // Only apply "SLOW" to .ts and .mp4, not .m3u8
-            if (!/\.m3u8/i.test(rUrl) && !/\.mp4$/i.test(rUrl) && mbps !== null && mbps < slowThresholdMbps) {
-                    if (
-                        !rUrl.endsWith('.mp4') &&
-                        !rUrl.endsWith('.m3u8') &&
-                        !rUrl.endsWith('.manifest.m3u8')
-                    ) {
-                        status = 'SLOW';
-                    }
-            }
-
-
-            if (/\.mp4$/i.test(rUrl) && status === 'OK') {
-                if(!adv_debounce) {
-                    const adData = {
-                        title: title,
-                        event_type: 'adv_show',
-                    };
-                    adv_shown = adv_shown + 1;
-                    metrics.adv_shown = adv_shown;
-                    adv_debounce = true;
-                }
-            }
-
-            const reqData = {
-                url: rUrl,
-                type: req.resourceType(),
-                status,
-                mbps: mbps ? mbps.toFixed(4) : '',
-                size: sizeMBytes ? sizeMBytes : 'n/a'
-            };
-
-            chunk_count = chunk_count + 1;
-            metrics.requests = chunk_count;
-            if (status !== 'OK' && /\.mp4:hls/i.test(rUrl)) {
-                if (
-                    !rUrl.endsWith('.mp4') &&
-                    !rUrl.endsWith('.m3u8') &&
-                    !rUrl.endsWith('.manifest.m3u8')
-                )
-                {
-                    metrics.suspiciousRequests.push(reqData);
-                }
-            }
-
-            res.write(`data: ${JSON.stringify(reqData)}\n\n`);
-        });
-
-        page.on('requestfailed', req => {
-            const rUrl = req.url();
-            if (!isMedia(rUrl)) return;
-
-            let status = 'FAILED';
-
-            const reqData = {
-                url: rUrl,
-                type: req.resourceType(),
-                status,
-                mbps: '',
-                size: '',
-                reason: req.failure() ? req.failure().errorText : 'unknown'
-            };
-
-            if (
-                !rUrl.endsWith('.mp4') &&
-                !rUrl.endsWith('.m3u8') &&
-                !rUrl.endsWith('.manifest.m3u8')
-            ) {
-                metrics.suspiciousRequests.push(reqData);
-            }
-
-            res.write(`data: ${JSON.stringify(reqData)}\n\n`);
-        });
-
-        await page.goto(url, {waitUntil: 'networkidle2'});
-
-        await new Promise(r => setTimeout(r, firstDuration));
-
-        if (rewind) {
-            console.log('Try fwd');
-            await page.waitForFunction('typeof CDNplayer !== "undefined"', {timeout: 5000});
-            const playerStatus = await page.evaluate(() => {
-                if (CDNplayer && CDNplayer.api) {
-                    // Example: check current time
-                    const dur = CDNplayer.api('duration');
-                    console.log('Do seek to: ' + dur);
-
-                    if (dur && dur > 0) {
-                        CDNplayer.api("seek", dur / 2);
-                        CDNplayer.api("play");
-                    }
-                    return {
-                        currentTime: CDNplayer.api('time'),
-                        duration: CDNplayer.api('duration')
-                    };
-                } else {
-                    return null;
-                }
-            });
-
-            if (playerStatus) {
-                adv_debounce = false;
-                console.log('FWD - OK. Player API data:', playerStatus);
-            } else {
-                console.log('FWD Failed. CDNplayer.api not reached');
-            }
-            // Phase 2
-            await new Promise(r => setTimeout(r, secondDuration));
-        }
-        await browser.close();
-
-        // If no .m3u8 ever loaded, log warning
-        if (!m3u8Loaded) {
-            const warn = {url, type: 'playlist', status: 'M3U8_NOT_LOADED'};
-            metrics.suspiciousRequests.push(warn);
-            metrics.test_status = 'M3U8_NOT_LOADED';
-            res.write(`data: ${JSON.stringify(warn)}\n\n`);
-        }
-    }
-
-    // Send final event
-    res.write(`event: done\ndata: ${JSON.stringify(metrics)}\n\n`);
-    metrics.test_finish = new Date().toISOString();
-    metrics.test_status = 'FINISHED';
-    logMetrics(metrics);
-    console.log(metrics);
+    // Грейсфул закрытие страницы/контекста
+    try { await page?.close(); } catch {}
+    try { if (context && typeof context.close === 'function') await context.close(); } catch {}
+    // Не закрываем browserSingleton — переиспользуем
     res.end();
+  }
 });
 
-function writeRow(row, res) {
-    const line = JSON.stringify(row);
-    fs.appendFileSync(logFile, line + "\n");
-    res.write(`data: ${line}\n\n`);
-}
+app.get('/', (_req, res) => {
+  res.status(200).send('Puppeteer NDJSON tester is alive.\nUse GET /run?test=5 or 5r5&title=...&url=<ENCODED_URL>');
+});
 
-app.listen(port, () => console.log(`Puppeteer SSE server running at http://localhost:${port}`));
+app.listen(PORT, () => {
+  ndjson('info', { msg: `Puppeteer NDJSON tester running at http://0.0.0.0:${PORT}` });
+});
