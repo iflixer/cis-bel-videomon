@@ -169,6 +169,9 @@ app.get('/run', async (req, res) => {
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Connection', 'keep-alive');
 
+//   res.status(202).end();
+
+
   // отправка SSE-строки
   const sse = (event, payload) => res.write(`${event ? `event: ${event}\n` : ''}data: ${JSON.stringify(payload)}\n\n`);
 

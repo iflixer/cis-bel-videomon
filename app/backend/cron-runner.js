@@ -99,7 +99,7 @@ async function runTest() {
       `&url=${encodeURIComponent(targetUrl)}`;
 
     console.log('Triggering run:', runUrl);
-    const runRes = await fetchWithTimeout(runUrl, { timeoutMs: 15000 });
+    const runRes = await fetchWithTimeout(runUrl, { timeoutMs: 300000 });
     if (!runRes.ok) {
       const txt = await runRes.text().catch(() => '');
       throw new Error(`Runner HTTP ${runRes.status}: ${txt.slice(0, 200)}`);
