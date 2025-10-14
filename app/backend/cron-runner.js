@@ -11,21 +11,6 @@ let config = {
     serverPort: 3002
 };
 
-// агрегатор для финальной сводки
-function makeAgg() {
-  return {
-    startedAt: Date.now(),
-    firstM3u8At: null,
-    firstTsAt: null,
-    total: 0,      // всего успешных request (media)
-    slow: 0,
-    ok: 0,
-    failed: 0,     // loadingFailed
-    bytes: 0,      // суммарно по media
-    seconds: 0,    // сумма длительностей загрузки по media (для avg Mbps)
-  };
-}
-
 // ---------- Helper: parse test param into total minutes ----------
 function getTestDurationMinutes(testStr) {
     if (!testStr) return 5; // default 5 minutes
@@ -39,13 +24,40 @@ function getTestDurationMinutes(testStr) {
     return total || 5;
 }
 
+async function fetchWithTimeout(url, { timeoutMs = 10000, ...opts } = {}) {
+  const ac = new AbortController();
+  const id = setTimeout(() => ac.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...opts, signal: ac.signal });
+  } finally {
+    clearTimeout(id);
+  }
+}
+
+async function fetchJsonWithRetry(url, opts = {}) {
+  const retries = opts.retries ?? 3;
+  const baseDelay = opts.baseDelay ?? 1000;
+  for (let i = 0; i <= retries; i++) {
+    try {
+      const res = await fetchWithTimeout(url, { timeoutMs: 10000 });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return await res.json();
+    } catch (e) {
+      console.error(`[random_movie] attempt ${i+1}/${retries+1} failed:`, e.message);
+      if (i === retries) throw e;
+      await sleep(baseDelay * Math.pow(2, i)); // 1s, 2s, 4s
+    }
+  }
+}
+
 // ---------- Main Runner ----------
 async function runTest() {
     console.log(`[${new Date().toISOString()}] Cron triggered...`);
 
     try {
-        const resp = await fetch(config.jsonEndpoint);
-        const data = await resp.json();
+        // const resp = await fetch(config.jsonEndpoint);
+        const data = await fetchJsonWithRetry(config.jsonEndpoint, { retries: 3, baseDelay: 1000, timeoutMs: 10000 });
+        // const data = await resp.json();
 
         let targetUrl = null;
         if (data.kinopoisk) {
