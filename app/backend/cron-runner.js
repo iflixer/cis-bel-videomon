@@ -1,117 +1,143 @@
-const fetch = (...args) => import('node-fetch').then(({default: fetch}) => fetch(...args));
-
+// ESM-compatible node-fetch
+const fetch = (...args) => import('node-fetch').then(({ default: f }) => f(...args));
+const express = require('express');
 const cron = require('node-cron');
 
-// ---------- Config variables ----------
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// ---------- Config ----------
 let config = {
-    test: "5r5",             // can be "2", "2r2", "5r5" etc.
-    quality: "1080",
-    domain: "piratka.me",
-    jsonEndpoint: "https://master.futmax.info/test/random_movie",
-    serverPort: 3002
+  test: '5r5',                  // "2", "2r2", "5r5"
+  quality: '1080',
+  domain: 'piratka.me',
+  jsonEndpoint: 'https://master.futmax.info/test/random_movie',
+  serverPort: 3002,             // где слушает puppeteer-sse.js
 };
 
-// ---------- Helper: parse test param into total minutes ----------
+// ---------- Utils ----------
 function getTestDurationMinutes(testStr) {
-    if (!testStr) return 5; // default 5 minutes
-    // e.g. "2r2" → [2, 2], "5" → [5]
-    const parts = testStr
-        .split('r')
-        .map(n => parseInt(n, 10))  // <-- decimal, not binary
-        .filter(n => !isNaN(n));
-
-    const total = parts.reduce((sum, n) => sum + n, 0);
-    return total || 5;
+  if (!testStr) return 5;
+  const parts = String(testStr)
+    .split('r')
+    .map((n) => parseInt(n, 10))
+    .filter((n) => !Number.isNaN(n) && n > 0);
+  const total = parts.reduce((s, n) => s + n, 0);
+  return total || 5;
 }
 
-async function fetchWithTimeout(url, { timeoutMs = 10000, ...opts } = {}) {
+async function fetchWithTimeout(url, opts = {}) {
+  const { timeoutMs = 10000, ...rest } = opts;
   const ac = new AbortController();
-  const id = setTimeout(() => ac.abort(), timeoutMs);
+  const t = setTimeout(() => ac.abort(), timeoutMs);
   try {
-    return await fetch(url, { ...opts, signal: ac.signal });
+    return await fetch(url, { ...rest, signal: ac.signal });
   } finally {
-    clearTimeout(id);
+    clearTimeout(t);
   }
 }
 
-async function fetchJsonWithRetry(url, opts = {}) {
-  const retries = opts.retries ?? 3;
-  const baseDelay = opts.baseDelay ?? 1000;
-  for (let i = 0; i <= retries; i++) {
+async function fetchJsonWithRetry(url, { attempts = 4, baseDelay = 1000, timeoutMs = 10000, ...opts } = {}) {
+  let lastErr;
+  for (let i = 1; i <= attempts; i++) {
     try {
-      const res = await fetchWithTimeout(url, { timeoutMs: 10000 });
+      const res = await fetchWithTimeout(url, { ...opts, timeoutMs });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       return await res.json();
     } catch (e) {
-      console.error(`[random_movie] attempt ${i+1}/${retries+1} failed:`, e.message);
-      if (i === retries) throw e;
-      await sleep(baseDelay * Math.pow(2, i)); // 1s, 2s, 4s
+      lastErr = e;
+      console.error(`[retry] ${i}/${attempts} ${e.message}`);
+      if (i < attempts) await sleep(baseDelay * i); // линейный backoff
     }
+  }
+  throw lastErr;
+}
+
+// ---------- Main ----------
+let timer = null;
+async function runTest() {
+  const started = Date.now();
+  console.log(`[${new Date().toISOString()}] Cron triggered…`);
+
+  try {
+    const data = await fetchJsonWithRetry(config.jsonEndpoint, {
+      attempts: 4,
+      baseDelay: 1500,
+      timeoutMs: 10000,
+      headers: { 'Accept': 'application/json' },
+    });
+
+    // безопасное извлечение
+    const kp = data?.kinopoisk;
+    const direct = data?.direct;
+    let targetUrl = kp || direct || null;
+
+    const ruName = (data?.ru_name || '').trim();
+    const enName = (data?.name || '').trim();
+    const itemTitle = [ruName, enName].filter(Boolean).join(' / ') || 'Untitled';
+
+    if (!targetUrl) {
+      console.error('No valid URL (kinopoisk/direct) in JSON:', data);
+      return scheduleNext();
+    }
+
+    // добавляем параметры
+    const qs = new URLSearchParams({
+      domain: String(config.domain || ''),
+      autoplay: '1',
+      monq: String(config.quality || ''),
+    });
+    if (targetUrl.includes('?')) {
+      targetUrl = `${targetUrl}&${qs.toString()}`;
+    } else {
+      targetUrl = `${targetUrl}?${qs.toString()}`;
+    }
+    console.log('Test url:', targetUrl);
+
+    const runUrl = `http://localhost:${config.serverPort}/run` +
+      `?test=${encodeURIComponent(config.test)}` +
+      `&title=${encodeURIComponent(itemTitle)}` +
+      `&url=${encodeURIComponent(targetUrl)}`;
+
+    console.log('Triggering run:', runUrl);
+    const runRes = await fetchWithTimeout(runUrl, { timeoutMs: 15000 });
+    if (!runRes.ok) {
+      const txt = await runRes.text().catch(() => '');
+      throw new Error(`Runner HTTP ${runRes.status}: ${txt.slice(0, 200)}`);
+    }
+  } catch (err) {
+    console.error('Cron error:', err);
+  } finally {
+    const ms = Date.now() - started;
+    console.log(`Run took ${Math.round(ms / 1000)}s`);
+    scheduleNext();
   }
 }
 
-// ---------- Main Runner ----------
-async function runTest() {
-    console.log(`[${new Date().toISOString()}] Cron triggered...`);
-
-    try {
-        // const resp = await fetch(config.jsonEndpoint);
-        const data = await fetchJsonWithRetry(config.jsonEndpoint, { retries: 3, baseDelay: 1000, timeoutMs: 10000 });
-        // const data = await resp.json();
-
-        let targetUrl = null;
-        if (data.kinopoisk) {
-            targetUrl = data.kinopoisk;
-        } else if (data.direct) {
-            targetUrl = data.direct;
-        }
-
-        let itemtitle = data.ru_name+' / '+data.name;
-
-        if (!targetUrl) {
-            console.error("No valid URL found in JSON");
-            return;
-        }
-
-        // Append quality param
-        if (config.quality) {
-            targetUrl = `${targetUrl}?domain=${config.domain}&autoplay=1&monq=${config.quality}`;
-            console.log('Test url: '+targetUrl);
-        }
-
-        // Build internal run URL
-        const runUrl = `http://localhost:${config.serverPort}/run?test=${config.test}&title=${encodeURIComponent(itemtitle)}&url=${encodeURIComponent(targetUrl)}`;
-        console.log("Triggering run:", runUrl);
-
-        await fetch(runUrl);
-
-    } catch (err) {
-        console.error("Cron error:", err);
-    }
-
-    // Schedule next run dynamically
-    const minutes = getTestDurationMinutes(config.test);
-    const intervalSec = (minutes * 60) + 120; // 2min gap for adverts
-    console.log(`Next run in ${intervalSec} sec...`);
-
-    setTimeout(runTest, intervalSec * 1000);
+function scheduleNext() {
+  const minutes = getTestDurationMinutes(config.test);
+  const intervalSec = minutes * 60 + 120; // +2 минуты на рекламу
+  console.log(`Next run in ${intervalSec} sec…`);
+  clearTimeout(timer);
+  timer = setTimeout(runTest, intervalSec * 1000);
 }
 
-// ---------- Start first run ----------
+// Старт
 runTest();
 
-// ---------- API to update config ----------
-const express = require('express');
+// ---------- API для обновления конфигурации ----------
 const app = express();
 app.use(express.json());
 
 app.post('/cronrun/config', (req, res) => {
-    const { test, quality, jsonEndpoint } = req.body;
-    if (test) config.test = test;
-    if (domain) config.test = domain;
-    if (quality) config.quality = quality;
-    if (jsonEndpoint) config.jsonEndpoint = jsonEndpoint;
-    res.json({ status: "ok", config });
+  const { test, quality, jsonEndpoint, domain } = req.body || {};
+  if (typeof test === 'string' && test.trim()) config.test = test.trim();
+  if (typeof domain === 'string' && domain.trim()) config.domain = domain.trim();
+  if (typeof quality === 'string' && quality.trim()) config.quality = quality.trim();
+  if (typeof jsonEndpoint === 'string' && jsonEndpoint.trim()) config.jsonEndpoint = jsonEndpoint.trim();
+
+  // при обновлении — пересчитать расписание
+  scheduleNext();
+  res.json({ status: 'ok', config });
 });
 
-app.listen(3100, () => console.log("Cron Runner listening on port 3100"));
+app.listen(3100, () => console.log('Cron Runner listening on port 3100'));
