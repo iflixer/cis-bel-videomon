@@ -124,14 +124,14 @@ jobs:
           run: echo "Deploying ${IMAGE_REPO}:${DEPLOY_TAG} to ${NAMESPACE}/ds/${DS_NAME}"
 
         - name: Set image on DaemonSet
-          run: kubectl -n "$NAMESPACE" set image ds/"$DS_NAME" app="${IMAGE_REPO}:${DEPLOY_TAG}"
+          run: kubectl -n "$NAMESPACE" set image ds/"$DS_NAME" video-tester-app="${IMAGE_REPO}:${DEPLOY_TAG}"
 
         - name: Wait rollout
           run: kubectl -n "$NAMESPACE" rollout status ds/"$DS_NAME" --timeout=10m
 
         - name: Pods
           if: always()
-          run: kubectl -n "$NAMESPACE" get pods -o wide -l app="$DS_NAME"
+          run: kubectl -n "$NAMESPACE" get pods -o wide -l video-tester-app="$DS_NAME"
 
   notify:
     runs-on: ubuntu-latest
