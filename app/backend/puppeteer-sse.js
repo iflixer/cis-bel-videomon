@@ -453,6 +453,11 @@ app.get('/', (_req, res) => {
   res.status(200).send('Puppeteer NDJSON tester is alive.\nUse GET /run?test=5 or 5r5&title=...&url=<ENCODED_URL>');
 });
 
+// --- Healthcheck endpoint для Kubernetes probes ---
+app.get('/healthz', (req, res) => {
+  res.status(200).send('OK');
+});
+
 app.listen(PORT, () => {
   ndjson('info', { msg: `Puppeteer NDJSON tester running at http://0.0.0.0:${PORT}` });
 });
