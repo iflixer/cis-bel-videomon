@@ -72,13 +72,29 @@ jobs:
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
 
-      - name: Login GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
+      # - name: Login GHCR
+      #   uses: docker/login-action@v3
+      #   with:
+      #     registry: ghcr.io
+      #     username: ${{ github.actor }}
+      #     password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Login GHCR (retry)
+        env:
+          REGISTRY: ghcr.io
+          USERNAME: ${{ github.actor }}
+          PASSWORD: ${{ secrets.GITHUB_TOKEN }}   # либо PAT c write:packages для чужой орг-ии
+        run: |
+          set -e
+          for i in 1 2 3 4 5; do
+            if echo "$PASSWORD" | docker login "$REGISTRY" -u "$USERNAME" --password-stdin; then
+              echo "Logged in to $REGISTRY"
+              exit 0
+            fi
+            echo "Login failed (attempt $i). Retrying in $((i*5))s…"
+            sleep $((i*5))
+          done
+          echo "GHCR login failed after retries" >&2
+          exit 1
       - name: Set output version
         id: outver
         run: echo "tag=${DEPLOY_TAG}" >> "$GITHUB_OUTPUT"
