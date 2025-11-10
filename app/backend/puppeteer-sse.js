@@ -11,6 +11,82 @@ const HEADLESS = (process.env.HEADLESS ?? 'true') !== 'false';
 const SLOW_THRESHOLD_MBPS = parseFloat(process.env.SLOW_THRESHOLD_MBPS || '3'); // <— порог "медленно"
 const TOP_N = 5; // топ-N по entrypoint/router
 
+
+const client = require('prom-client');
+
+// Отдельный реестр, префикс для всех дефолтных метрик процесса
+const register = new client.Registry();
+register.setDefaultLabels({ app: 'puppeteer-sse' });
+client.collectDefaultMetrics({ register, prefix: 'puppeteer_sse_' });
+
+// ---- Кастомные метрики ----
+const testRunsTotal = new client.Counter({
+  name: 'puppeteer_sse_runs_total',
+  help: 'Total test runs by result',
+  labelNames: ['result'],
+  registers: [register],
+});
+
+const mediaRequestsTotal = new client.Counter({
+  name: 'puppeteer_sse_media_requests_total',
+  help: 'Media requests observed (finished/slow/failed)',
+  labelNames: ['status'],
+  registers: [register],
+});
+
+const mediaBytesTotal = new client.Counter({
+  name: 'puppeteer_sse_media_bytes_total',
+  help: 'Total encoded bytes for finished media requests',
+  registers: [register],
+});
+
+const mediaMbpsHist = new client.Histogram({
+  name: 'puppeteer_sse_media_mbps',
+  help: 'Per-request download speed (Mbps)',
+  buckets: [0.25, 0.5, 1, 2, 3, 5, 8, 12, 20, 30, 50, 80, 120],
+  registers: [register],
+});
+
+const ttfbMsHist = new client.Histogram({
+  name: 'puppeteer_sse_ttfb_ms',
+  help: 'Per-request TTFB (ms)',
+  buckets: [10, 20, 30, 50, 75, 100, 150, 200, 300, 500, 800, 1200, 2000, 3000],
+  registers: [register],
+});
+
+const totalMsHist = new client.Histogram({
+  name: 'puppeteer_sse_total_ms',
+  help: 'Per-request total load time (ms)',
+  buckets: [10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000],
+  registers: [register],
+});
+
+const ttfm3u8Gauge = new client.Gauge({
+  name: 'puppeteer_sse_ttf_m3u8_ms',
+  help: 'Time to first m3u8 from test start (ms, last run)',
+  registers: [register],
+});
+
+const ttfsegGauge = new client.Gauge({
+  name: 'puppeteer_sse_ttf_first_segment_ms',
+  help: 'Time to first TS segment from test start (ms, last run)',
+  registers: [register],
+});
+
+const slowPercentGauge = new client.Gauge({
+  name: 'puppeteer_sse_slow_percent',
+  help: 'Slow requests percent in the last run',
+  registers: [register],
+});
+
+const qualityCompareTotal = new client.Counter({
+  name: 'puppeteer_sse_quality_compare_total',
+  help: 'Quality comparisons by result',
+  labelNames: ['ok'], // "true"/"false"
+  registers: [register],
+});
+
+
 // ---- helpers ----
 function nowIso() { return new Date().toISOString(); }
 function ndjson(type, payload = {}) {
@@ -318,6 +394,15 @@ app.get('/run', async (req, res) => {
 
       metrics.requests += 1;
 
+      // prom metrics
+      if (isMediaUrl(url2)) {
+        mediaRequestsTotal.inc({ status: statusTag === 'SLOW' ? 'SLOW' : 'OK' });
+        mediaBytesTotal.inc(encodedBytes);
+        if (ttfb_ms != null) ttfbMsHist.observe(ttfb_ms);
+        if (total_ms != null) totalMsHist.observe(total_ms);
+        if (mbps != null) mediaMbpsHist.observe(mbps);
+      }
+
       // в SSE — каждую медиа-запись
       sse('', {
         url: url2,
@@ -352,6 +437,11 @@ app.get('/run', async (req, res) => {
         status: 'FAILED',
         reason: e.errorText || 'unknown',
       });
+
+      if (isMediaUrl(url2)) {
+        mediaRequestsTotal.inc({ status: 'FAILED' });
+      }
+
       sse('', { url: url2, type: 'request', status: 'FAILED', reason: e.errorText || 'unknown' });
       ndjson('request', { url: url2, status: 'FAILED', reason: e.errorText || 'unknown' });
     });
@@ -434,6 +524,19 @@ app.get('/run', async (req, res) => {
         : null,
     };
 
+    // Gauges для последнего прогона
+    if (ttfm3u8_ms != null) ttfm3u8Gauge.set(ttfm3u8_ms);
+    if (ttfseg_ms  != null) ttfsegGauge.set(ttfseg_ms);
+    slowPercentGauge.set(slowPct);
+
+    // Счётчик прогонов по результату
+    testRunsTotal.inc({ result: metrics.test_status || 'UNKNOWN' });
+
+    // Сравнение качества (если было)
+    if (summary.quality_ok !== null) {
+      qualityCompareTotal.inc({ ok: String(!!summary.quality_ok) });
+    }
+
     ndjson('summary', summary);
     sse('summary', summary);
 
@@ -459,6 +562,15 @@ app.get('/', (_req, res) => {
 // --- Healthcheck endpoint для Kubernetes probes ---
 app.get('/healthz', (req, res) => {
   res.status(200).send('OK');
+});
+
+app.get('/metrics', async (_req, res) => {
+  try {
+    res.setHeader('Content-Type', register.contentType);
+    res.end(await register.metrics());
+  } catch (err) {
+    res.status(500).end(String(err || 'metrics error'));
+  }
 });
 
 app.listen(PORT, () => {

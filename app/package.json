@@ -10,7 +10,6 @@
   "keywords": [],
   "author": "",
   "license": "ISC",
-  "devDependencies": {},
   "repository": {
     "type": "git",
     "url": "git+https://github.com/iflixer/cis-bel-videomon.git"
@@ -20,11 +19,12 @@
   },
   "homepage": "https://github.com/iflixer/cis-bel-videomon#readme",
   "dependencies": {
-    "concurrently": "^9.2.1",
     "child_process": "^1.0.2",
+    "concurrently": "^9.2.1",
     "express": "^5.1.0",
     "node-cron": "^4.2.1",
     "node-fetch": "^3.3.2",
+    "prom-client": "^15.1.3",
     "puppeteer": "^24.23.0"
   }
 }
