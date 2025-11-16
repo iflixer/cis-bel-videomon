@@ -90,7 +90,7 @@
         }
 
         // SSE connection
-        const sse = new EventSource(`http://localhost:3001/run?test=${testtype}&title=Manual_Test&url=${encodeURIComponent(url)}%3Fdomain%3Dpiratka.me%26autoplay%3D1%26monq%3D${quality}`);
+        const sse = new EventSource(`http://localhost:3001/run?test=${testtype}&title=Manual_Test&url=${encodeURIComponent(url)}%3Fdomain%3Dtg.piratka.me%26autoplay%3D1%26monq%3D${quality}`);
 
         sse.onmessage = function (event) {
             const r = JSON.parse(event.data);

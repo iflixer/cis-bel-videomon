@@ -9,7 +9,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 let config = {
   test: '5r5',                  // "2", "2r2", "5r5"
   quality: '1080',
-  domain: 'piratka.me',
+  domain: 'tg.piratka.me',
   jsonEndpoint: 'https://master.futmax.info/test/random_movie',
   serverPort: 3002,             // где слушает puppeteer-sse.js
 };
